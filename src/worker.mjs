@@ -71,6 +71,9 @@ const API_VERSION = "v1beta";
 const API_CLIENT = "genai-js/0.21.0"; // npm view @google/generative-ai version
 const makeHeaders = (apiKey, more) => ({
   "x-goog-api-client": API_CLIENT,
+  "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  "accept-language": "en-US,en;q=0.9",
+  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
   ...(apiKey && { "x-goog-api-key": apiKey }),
   ...more
 });
@@ -87,16 +90,50 @@ const API_REGIONS = [
   "asia-southeast1", // Asia (Singapore)
 ];
 
+async function fetchWithProxy(url, options) {
+  const PROXY_SERVERS = [
+    'https://api.direct.generativelanguage.google.com',
+    'https://generativelanguage.googleapis.com',
+    'https://us-generativelanguage.googleapis.com',
+    'https://eu-generativelanguage.googleapis.com',
+    'https://asia-generativelanguage.googleapis.com'
+  ];
+  
+  let lastError;
+  for (const proxyServer of PROXY_SERVERS) {
+    try {
+      const proxyUrl = url.replace(BASE_URL, proxyServer);
+      const response = await fetch(proxyUrl, options);
+      if (response.ok) {
+        return response;
+      }
+      const errorData = await response.json();
+      if (errorData?.error?.message !== "User location is not supported for the API use.") {
+        return response;
+      }
+      lastError = errorData;
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
+  }
+  return null;
+}
+
 async function fetchWithRegionFallback(url, options) {
   let lastError;
   
+  // First try direct fetch with regions
   for (const region of API_REGIONS) {
     try {
       const opts = {
         ...options,
         headers: {
           ...options.headers,
-          "x-goog-location": region
+          "x-goog-location": region,
+          "x-goog-user-project": "gemini-api-proxy",
+          "x-goog-api-client": API_CLIENT,
+          "origin": "https://gemini.aigenius.ddns-ip.net"
         }
       };
       
@@ -114,8 +151,14 @@ async function fetchWithRegionFallback(url, options) {
       lastError = err;
     }
   }
-  
-  throw new HttpError(lastError?.error?.message || "No available regions found", 400);
+
+  // If direct fetch fails, try proxy servers
+  const proxyResponse = await fetchWithProxy(url, options);
+  if (proxyResponse) {
+    return proxyResponse;
+  }
+
+  throw new HttpError(lastError?.error?.message || "No available regions or proxies found", 400);
 }
 
 async function handleModels (apiKey) {
