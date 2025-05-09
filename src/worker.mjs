@@ -75,8 +75,51 @@ const makeHeaders = (apiKey, more) => ({
   ...more
 });
 
+const API_REGIONS = [
+  "us-central1",  // United States (Iowa)
+  "us-east4",     // United States (Virginia)
+  "us-west1",     // United States (Oregon)
+  "europe-west1", // Europe (Belgium)
+  "europe-west2", // Europe (London)
+  "europe-west4", // Europe (Netherlands)
+  "asia-east1",   // Asia (Taiwan)
+  "asia-northeast1", // Asia (Tokyo)
+  "asia-southeast1", // Asia (Singapore)
+];
+
+async function fetchWithRegionFallback(url, options) {
+  let lastError;
+  
+  for (const region of API_REGIONS) {
+    try {
+      const opts = {
+        ...options,
+        headers: {
+          ...options.headers,
+          "x-goog-location": region
+        }
+      };
+      
+      const response = await fetch(url, opts);
+      if (response.ok) {
+        return response;
+      }
+      
+      const errorData = await response.json();
+      if (errorData?.error?.message !== "User location is not supported for the API use.") {
+        return response;
+      }
+      lastError = errorData;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  
+  throw new HttpError(lastError?.error?.message || "No available regions found", 400);
+}
+
 async function handleModels (apiKey) {
-  const response = await fetch(`${BASE_URL}/${API_VERSION}/models`, {
+  const response = await fetchWithRegionFallback(`${BASE_URL}/${API_VERSION}/models`, {
     headers: makeHeaders(apiKey),
   });
   let { body } = response;
@@ -112,7 +155,7 @@ async function handleEmbeddings (req, apiKey) {
   if (!Array.isArray(req.input)) {
     req.input = [ req.input ];
   }
-  const response = await fetch(`${BASE_URL}/${API_VERSION}/${model}:batchEmbedContents`, {
+  const response = await fetchWithRegionFallback(`${BASE_URL}/${API_VERSION}/${model}:batchEmbedContents`, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify({
@@ -165,7 +208,7 @@ async function handleCompletions (req, apiKey) {
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
   if (req.stream) { url += "?alt=sse"; }
-  const response = await fetch(url, {
+  const response = await fetchWithRegionFallback(url, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify(body),
