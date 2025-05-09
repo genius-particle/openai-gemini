@@ -161,24 +161,38 @@ async function fetchWithRegionFallback(url, options) {
   throw new HttpError(lastError?.error?.message || "No available regions or proxies found", 400);
 }
 
-async function handleModels (apiKey) {
+async function handleModels(apiKey) {
   const response = await fetchWithRegionFallback(`${BASE_URL}/${API_VERSION}/models`, {
     headers: makeHeaders(apiKey),
   });
-  let { body } = response;
+  
+  // Clone the response before reading it
+  const responseClone = response.clone();
+  
   if (response.ok) {
-    const { models } = JSON.parse(await response.text());
-    body = JSON.stringify({
-      object: "list",
-      data: models.map(({ name }) => ({
-        id: name.replace("models/", ""),
-        object: "model",
-        created: 0,
-        owned_by: "",
-      })),
-    }, null, "  ");
+    try {
+      const { models } = await response.json();
+      const body = JSON.stringify({
+        object: "list",
+        data: models.map(({ name }) => ({
+          id: name.replace("models/", ""),
+          object: "model",
+          created: 0,
+          owned_by: "",
+        })),
+      }, null, "  ");
+      return new Response(body, fixCors(responseClone));
+    } catch (error) {
+      console.error('Error processing models response:', error);
+      return new Response(
+        JSON.stringify({ error: "Failed to process models response" }), 
+        fixCors({ status: 500 })
+      );
+    }
   }
-  return new Response(body, fixCors(response));
+  
+  // If response is not ok, return the original error response
+  return new Response(await responseClone.text(), fixCors(responseClone));
 }
 
 const DEFAULT_EMBEDDINGS_MODEL = "text-embedding-004";
@@ -209,24 +223,36 @@ async function handleEmbeddings (req, apiKey) {
       }))
     })
   });
-  let { body } = response;
+
+  const responseClone = response.clone();
+  
   if (response.ok) {
-    const { embeddings } = JSON.parse(await response.text());
-    body = JSON.stringify({
-      object: "list",
-      data: embeddings.map(({ values }, index) => ({
-        object: "embedding",
-        index,
-        embedding: values,
-      })),
-      model: req.model,
-    }, null, "  ");
+    try {
+      const { embeddings } = JSON.parse(await response.text());
+      const body = JSON.stringify({
+        object: "list",
+        data: embeddings.map(({ values }, index) => ({
+          object: "embedding",
+          index,
+          embedding: values,
+        })),
+        model: req.model,
+      }, null, "  ");
+      return new Response(body, fixCors(responseClone));
+    } catch (error) {
+      console.error('Error processing embeddings response:', error);
+      return new Response(
+        JSON.stringify({ error: "Failed to process embeddings response" }), 
+        fixCors({ status: 500 })
+      );
+    }
   }
-  return new Response(body, fixCors(response));
+  
+  return new Response(await responseClone.text(), fixCors(responseClone));
 }
 
 const DEFAULT_MODEL = "gemini-2.0-flash";
-async function handleCompletions (req, apiKey) {
+async function handleCompletions(req, apiKey) {
   let model = DEFAULT_MODEL;
   switch (true) {
     case typeof req.model !== "string":
@@ -251,48 +277,69 @@ async function handleCompletions (req, apiKey) {
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
   if (req.stream) { url += "?alt=sse"; }
+  
   const response = await fetchWithRegionFallback(url, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
 
-  body = response.body;
+  const responseClone = response.clone();
+
   if (response.ok) {
-    let id = "chatcmpl-" + generateId(); //"chatcmpl-8pMMaqXMK68B3nyDBrapTDrhkHBQK";
+    let id = "chatcmpl-" + generateId();
     const shared = {};
+
     if (req.stream) {
-      body = response.body
-        .pipeThrough(new TextDecoderStream())
-        .pipeThrough(new TransformStream({
-          transform: parseStream,
-          flush: parseStreamFlush,
-          buffer: "",
-          shared,
-        }))
-        .pipeThrough(new TransformStream({
-          transform: toOpenAiStream,
-          flush: toOpenAiStreamFlush,
-          streamIncludeUsage: req.stream_options?.include_usage,
-          model, id, last: [],
-          shared,
-        }))
-        .pipeThrough(new TextEncoderStream());
-    } else {
-      body = await response.text();
       try {
-        body = JSON.parse(body);
-        if (!body.candidates) {
+        const transformedBody = response.body
+          .pipeThrough(new TextDecoderStream())
+          .pipeThrough(new TransformStream({
+            transform: parseStream,
+            flush: parseStreamFlush,
+            buffer: "",
+            shared,
+          }))
+          .pipeThrough(new TransformStream({
+            transform: toOpenAiStream,
+            flush: toOpenAiStreamFlush,
+            streamIncludeUsage: req.stream_options?.include_usage,
+            model, id, last: [],
+            shared,
+          }))
+          .pipeThrough(new TextEncoderStream());
+
+        return new Response(transformedBody, fixCors(responseClone));
+      } catch (error) {
+        console.error('Error processing stream:', error);
+        return new Response(
+          JSON.stringify({ error: "Failed to process stream response" }), 
+          fixCors({ status: 500 })
+        );
+      }
+    } else {
+      try {
+        const responseText = await response.text();
+        const responseData = JSON.parse(responseText);
+        
+        if (!responseData.candidates) {
           throw new Error("Invalid completion object");
         }
-      } catch (err) {
-        console.error("Error parsing response:", err);
-        return new Response(body, fixCors(response)); // output as is
+        
+        const processedBody = processCompletionsResponse(responseData, model, id);
+        return new Response(processedBody, fixCors(responseClone));
+      } catch (error) {
+        console.error('Error processing completion response:', error);
+        return new Response(
+          JSON.stringify({ error: "Failed to process completion response" }), 
+          fixCors({ status: 500 })
+        );
       }
-      body = processCompletionsResponse(body, model, id);
     }
   }
-  return new Response(body, fixCors(response));
+  
+  // If response is not ok, return the original error response
+  return new Response(await responseClone.text(), fixCors(responseClone));
 }
 
 const adjustProps = (schemaPart) => {
